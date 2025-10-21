@@ -6,9 +6,11 @@ Fetches messages from configured Telegram groups and saves to MySQL database
 import asyncio
 import os
 import logging
-from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime, timezone
+from urllib.parse import unquote
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 from dotenv import load_dotenv
 import mysql.connector
@@ -28,13 +30,16 @@ class TelegramIngestionService:
         logger.setLevel(logging.INFO)
         
         if not logger.handlers:
+            # Create Logs directory if it doesn't exist
+            log_dir = os.path.join(os.path.dirname(__file__), 'Logs')
+            os.makedirs(log_dir, exist_ok=True)
+            
             # New log every 12 hours, keep 6 files (72 hours total)
-            handler = RotatingFileHandler(
-                'ingest.log',
-                maxBytes=50*1024*1024,  # 50MB per file
-                backupCount=6,
+            handler = TimedRotatingFileHandler(
+                os.path.join(log_dir, 'ingest.log'),
                 when='h',
-                interval=12
+                interval=12,
+                backupCount=6
             )
             
             formatter = logging.Formatter(
@@ -75,7 +80,14 @@ class TelegramIngestionService:
     async def connect_client(self):
         """Connect to Telegram using session string"""
         try:
-            self.client = TelegramClient('session', session=self.session_string)
+            api_id = os.getenv('TELEGRAM_API_ID')
+            api_hash = os.getenv('TELEGRAM_API_HASH')
+            
+            if not api_id or not api_hash:
+                self.logger.error("TELEGRAM_API_ID or TELEGRAM_API_HASH not found")
+                return False
+            
+            self.client = TelegramClient(StringSession(self.session_string), int(api_id), api_hash)
             
             self.logger.info("Connecting to Telegram")
             await self.client.connect()
@@ -112,7 +124,14 @@ class TelegramIngestionService:
             self.logger.info(f"Fetching messages from '{group_name}'")
             
             async for message in self.client.iter_messages(group, limit=None):
-                if message.date < time_limit:
+                # Ensure both datetimes are timezone-aware for comparison
+                msg_date = message.date
+                if time_limit.tzinfo is None:
+                    time_limit = time_limit.replace(tzinfo=timezone.utc)
+                if msg_date.tzinfo is None:
+                    msg_date = msg_date.replace(tzinfo=timezone.utc)
+                
+                if msg_date < time_limit:
                     break
                 
                 messages.append({
@@ -149,12 +168,17 @@ class TelegramIngestionService:
         
         try:
             # Parse MySQL connection URL
-            url_parts = database_url.replace('mysql://', '').split('/')
+            url_parts = database_url.replace('mysql+mysqlconnector://', '').replace('mysql://', '').split('/')
             auth_host = url_parts[0]
             database = url_parts[1] if len(url_parts) > 1 else 'test'
             
-            auth, host_port = auth_host.split('@')
-            username, password = auth.split(':')
+            # Split from the right to handle @ in password
+            auth, host_port = auth_host.rsplit('@', 1)
+            username, password = auth.split(':', 1)
+            
+            # URL decode the password
+            password = unquote(password)
+            
             host = host_port.split(':')[0]
             port = int(host_port.split(':')[1]) if ':' in host_port else 3306
             
@@ -169,16 +193,16 @@ class TelegramIngestionService:
             
             # Prepare batch data
             batch_data = [
-                (msg['id'], msg['group_id'], msg['text'], 'pending_ai_review', msg['date'])
+                (msg['text'], msg['date'])
                 for msg in messages
             ]
             
-            # Batch insert with IGNORE for deduplication
+            # Batch insert
             cursor.executemany(
                 """
-                INSERT IGNORE INTO JobNotification 
-                (message_id, group_id, job_post_text, status, created_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO jobs 
+                (job, job_timestamp)
+                VALUES (%s, %s)
                 """,
                 batch_data
             )

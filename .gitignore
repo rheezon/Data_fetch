@@ -3,9 +3,12 @@
 
 # Telegram session files
 *.session
+*.session-journal
 
 # Log files
 *.log
+Logs/
+ingest.log*   # Ignore all ingest log files (with date/time suffix)
 
 # Python cache
 __pycache__/

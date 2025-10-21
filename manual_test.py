@@ -4,13 +4,13 @@ Import and test the production code with sample configuration
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ingest import run_fetcher_task
 
 if __name__ == "__main__":
     # Sample configuration for testing
     config = {
-        'last_fetched_at': datetime.now() - timedelta(hours=24)  # Last 24 hours
+        'last_fetched_at': datetime.now(timezone.utc) - timedelta(hours=24)  # Last 24 hours
     }
     
     try:

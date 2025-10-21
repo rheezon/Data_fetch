@@ -1,22 +1,23 @@
 # Job Notifier - Telegram Ingestion Service
 
-A production-ready Python service that automatically fetches job postings from Telegram groups and stores them in a MySQL database for further processing and analysis.
+A production-ready, standalone Python service that automatically fetches job postings from Telegram groups every 5 hours and stores them in a MySQL database.
 
 ## Description
 
-This service monitors specified Telegram groups/channels for new messages, extracts job-related content, and stores it in a structured MySQL database. The system is designed for automated, non-interactive operation and can be easily integrated with job schedulers or cron systems.
+This service monitors specified Telegram groups/channels for new messages, extracts job-related content, and stores it in a MySQL database. It runs continuously with a built-in scheduler, requiring no external dependencies or manual intervention.
 
 ## Key Features
 
-- **Secure Session Authentication**: Uses pre-generated session strings instead of storing API credentials
-- **Automated & Non-Interactive**: Runs without user input, perfect for scheduled execution
-- **MySQL Integration**: Efficient batch processing with duplicate prevention
-- **Robust Logging**: 72-hour log retention with automatic rotation
-- **Error Resilience**: Individual group failures don't crash the entire process
+- **Built-in Scheduler**: Automatically runs every 5 hours without external cron jobs
+- **Secure Session Authentication**: Uses pre-generated session strings
+- **Standalone Operation**: Fully independent, no Java backend required
+- **MySQL Integration**: Direct database insertion with timezone-aware timestamps
+- **Robust Logging**: 72-hour log retention with automatic rotation in dedicated Logs folder
+- **Error Resilience**: Individual group failures don't crash the service
 - **Configurable Groups**: Monitor multiple Telegram groups via environment variables
-- **Production Ready**: Clean separation between service code and testing utilities
+- **Production Ready**: Designed for 24/7 operation
 
-## Setup and Usage
+## Quick Start
 
 ### 1. Install Dependencies
 ```bash
@@ -50,18 +51,12 @@ TELEGRAM_GROUPS=Tech Jobs,Python Jobs,Remote Work
 python manual_test.py
 ```
 
-### 6. Production Integration
-Import and use the service in your scheduler:
-```python
-from ingest import run_fetcher_task
-from datetime import datetime, timedelta
-
-config = {
-    'last_fetched_at': datetime.now() - timedelta(hours=1)
-}
-
-await run_fetcher_task(config)
+### 6. Start Production Service
+```bash
+python scheduler.py
 ```
+
+The service will now run continuously, fetching messages every 5 hours.
 
 ## Configuration
 
@@ -76,45 +71,71 @@ await run_fetcher_task(config)
 | `TELEGRAM_API_HASH` | API Hash from my.telegram.org (setup only) | Setup | `abcdef123456...` |
 | `TELEGRAM_PHONE_NUMBER` | Phone number for initial auth (setup only) | Setup | `+1234567890` |
 
+**Note**: If your password contains special characters like `@`, URL-encode them (e.g., `@` becomes `%40`)
+
 ### Database Schema
 
-The service expects a MySQL table named `JobNotification` with the following structure:
+The service uses a MySQL table named `jobs`:
 
 ```sql
-CREATE TABLE JobNotification (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    message_id BIGINT NOT NULL,
-    group_id BIGINT NOT NULL,
-    job_post_text TEXT,
-    status VARCHAR(50) DEFAULT 'pending_ai_review',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_message (message_id, group_id)
+CREATE TABLE jobs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    job VARCHAR(5000),
+    timestamp TIMESTAMP,
+    processed TINYINT(1) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-```
-
-### Automated Cleanup
-
-Set up this MySQL event for automatic cleanup of old records:
-
-```sql
-CREATE EVENT IF NOT EXISTS cleanup_old_notifications
-ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
-DO
-DELETE FROM JobNotification 
-WHERE created_at < DATE_SUB(NOW(), INTERVAL 48 HOUR);
 ```
 
 ## File Structure
 
 ```
-├── ingest.py           # Main production service
+├── scheduler.py        # Main production service with built-in scheduler
+├── ingest.py          # Core ingestion logic
 ├── generate_session.py # One-time session generator
-├── manual_test.py      # Testing utility
-├── requirements.txt    # Python dependencies
-├── .env.example       # Configuration template
-├── .gitignore         # Git ignore rules
-└── README.md          # This file
+├── manual_test.py     # Testing utility
+├── requirements.txt   # Python dependencies
+├── .env.example      # Configuration template
+├── .gitignore        # Git ignore rules
+├── Logs/             # Log files directory (auto-created)
+│   ├── ingest.log    # Ingestion service logs
+│   └── scheduler.log # Scheduler logs
+└── README.md         # This file
+```
+
+## Running as a Service
+
+### Linux (systemd)
+Create `/etc/systemd/system/telegram-fetcher.service`:
+```ini
+[Unit]
+Description=Telegram Job Fetcher Service
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=your_user
+WorkingDirectory=/path/to/raw_datafetcher
+ExecStart=/usr/bin/python3 /path/to/raw_datafetcher/scheduler.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-fetcher
+sudo systemctl start telegram-fetcher
+```
+
+### Windows (NSSM)
+```bash
+# Install NSSM (Non-Sucking Service Manager)
+nssm install TelegramFetcher "C:\Python\python.exe" "C:\path\to\scheduler.py"
+nssm start TelegramFetcher
 ```
 
 ## Security Notes
@@ -123,10 +144,48 @@ WHERE created_at < DATE_SUB(NOW(), INTERVAL 48 HOUR);
 - The session string provides full account access - keep it secure
 - Use the `.env.example` template for sharing configuration structure
 - API credentials are only needed once for session generation
+- URL-encode special characters in passwords
 
 ## Logging
 
-- Logs are written to `ingest.log`
+- Logs are stored in the `Logs/` directory
+- `ingest.log`: Message fetching and database operations
+- `scheduler.log`: Scheduler execution and task status
 - Files rotate every 12 hours with 6 files retained (72 hours total)
 - Each log entry includes timestamp, level, and detailed message
 - No sensitive information is logged
+
+## Monitoring
+
+Check if the service is running:
+```bash
+# Linux
+systemctl status telegram-fetcher
+
+# Windows
+sc query TelegramFetcher
+
+# Manual check
+tail -f Logs/scheduler.log
+```
+
+## Troubleshooting
+
+**Service not fetching messages:**
+- Check `Logs/scheduler.log` for errors
+- Verify database connection in `.env`
+- Ensure Telegram session is valid
+
+**Database connection errors:**
+- Verify DATABASE_URL format
+- Check if special characters in password are URL-encoded
+- Ensure MySQL server is running
+
+**Group not found warnings:**
+- Verify exact group names in TELEGRAM_GROUPS
+- Check if your account has access to the groups
+- Group names are case-sensitive
+
+## Support
+
+For issues or questions, check the log files in the `Logs/` directory for detailed error messages.
