@@ -5,7 +5,16 @@ Fetches messages from configured Telegram groups and saves to MySQL database
 
 import asyncio
 import os
+import sys
+import io
 import logging
+import re
+import hashlib
+
+# Fix UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timezone
 from urllib.parse import unquote
@@ -39,7 +48,8 @@ class TelegramIngestionService:
                 os.path.join(log_dir, 'ingest.log'),
                 when='h',
                 interval=12,
-                backupCount=6
+                backupCount=6,
+                encoding='utf-8'
             )
             
             formatter = logging.Formatter(
@@ -60,6 +70,19 @@ class TelegramIngestionService:
         groups = [group.strip() for group in groups_str.split(',') if group.strip()]
         self.logger.info(f"Configured groups: {groups}")
         return groups
+    
+    def _generate_text_hash(self, text):
+        """Generate SHA-256 hash of normalized text for deduplication"""
+        if not text:
+            return hashlib.sha256(b'').hexdigest()
+        
+        # Normalize text: remove URLs, punctuation, lowercase, trim spaces
+        normalized = text.lower()
+        normalized = re.sub(r'http[s]?://\S+', '', normalized)  # Remove URLs
+        normalized = re.sub(r'[^\w\s]', '', normalized)  # Remove punctuation
+        normalized = re.sub(r'\s+', ' ', normalized).strip()  # Normalize whitespace
+        
+        return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
     
     def _validate_config(self):
         """Validate required configuration"""
@@ -191,27 +214,83 @@ class TelegramIngestionService:
             )
             cursor = conn.cursor()
             
-            # Prepare batch data
+            # Prepare batch data with text hashes
             batch_data = [
-                (msg['text'], msg['date'])
+                (msg['text'], msg['date'], self._generate_text_hash(msg['text']))
                 for msg in messages
             ]
             
-            # Batch insert
+            total_messages = len(batch_data)
+            
+            # Batch insert with IGNORE to skip duplicates
             cursor.executemany(
                 """
-                INSERT INTO jobs 
-                (job, job_timestamp)
-                VALUES (%s, %s)
+                INSERT IGNORE INTO jobs 
+                (job, job_timestamp, text_hash)
+                VALUES (%s, %s, %s)
                 """,
                 batch_data
             )
             
             conn.commit()
-            self.logger.info(f"Batch saved {cursor.rowcount} new messages to database")
+            inserted = cursor.rowcount
+            skipped = total_messages - inserted
+            
+            self.logger.info(f"Inserted {inserted} new messages, skipped {skipped} duplicates")
             
         except Exception as e:
             self.logger.error(f"Error saving messages to database: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+            if 'conn' in locals():
+                conn.close()
+    
+    def cleanup_old_processed(self):
+        """Delete processed jobs older than 7 days"""
+        database_url = os.getenv('DATABASE_URL')
+        
+        try:
+            # Parse MySQL connection URL
+            url_parts = database_url.replace('mysql+mysqlconnector://', '').replace('mysql://', '').split('/')
+            auth_host = url_parts[0]
+            database = url_parts[1] if len(url_parts) > 1 else 'test'
+            
+            auth, host_port = auth_host.rsplit('@', 1)
+            username, password = auth.split(':', 1)
+            password = unquote(password)
+            
+            host = host_port.split(':')[0]
+            port = int(host_port.split(':')[1]) if ':' in host_port else 3306
+            
+            conn = mysql.connector.connect(
+                host=host,
+                port=port,
+                user=username,
+                password=password,
+                database=database
+            )
+            cursor = conn.cursor()
+            
+            # Delete old processed jobs
+            cursor.execute(
+                """
+                DELETE FROM jobs
+                WHERE processed = 1
+                  AND job_timestamp < (NOW() - INTERVAL 7 DAY)
+                """
+            )
+            
+            conn.commit()
+            deleted = cursor.rowcount
+            
+            if deleted > 0:
+                self.logger.info(f"Cleanup: Deleted {deleted} old processed jobs")
+            
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
         finally:
             if 'cursor' in locals():
                 cursor.close()

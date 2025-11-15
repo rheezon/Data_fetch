@@ -1,0 +1,14 @@
+
+
+services:
+  app:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: job_fetcher
+    env_file: .env
+    restart: unless-stopped
+    command: ["python", "scheduler.py"]
+    network_mode: "host"

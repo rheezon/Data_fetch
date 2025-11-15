@@ -7,11 +7,18 @@ import asyncio
 import time
 import logging
 import os
+import sys
+import io
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 from dotenv import load_dotenv
 import mysql.connector
 from ingest import run_fetcher_task
+
+# Fix UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Load environment variables
 load_dotenv()
@@ -24,10 +31,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'scheduler.log')),
+        logging.FileHandler(os.path.join(log_dir, 'scheduler.log'), encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
+
 logger = logging.getLogger('Scheduler')
 
 def get_last_fetch_time():
@@ -101,6 +109,12 @@ def run_task():
     try:
         asyncio.run(run_fetcher_task(config))
         logger.info("Task completed successfully")
+        
+        # Run cleanup after fetch
+        from ingest import TelegramIngestionService
+        service = TelegramIngestionService()
+        service.cleanup_old_processed()
+        
     except Exception as e:
         logger.error(f"Task failed: {e}")
         import traceback
