@@ -10,5 +10,5 @@ services:
     container_name: job_fetcher
     env_file: .env
     restart: unless-stopped
-    command: ["python", "scheduler.py"]
+    command: ["sh", "-c", "ls -la /app && python scheduler.py"]
     network_mode: "host"
